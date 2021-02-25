@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Awaitable, Callable, Dict, List, Optional
 
-from quart import Blueprint, current_app, Quart, request, Response
+from quart import Blueprint, current_app, Quart, request
 from quart.exceptions import TooManyRequests
 
 from .store import MemoryStore, RateLimiterStoreABC
@@ -21,7 +21,7 @@ class RateLimitExceeded(TooManyRequests):
         retry_after: Seconds left till the remaining resets to the limit.
     """
 
-    def __init__(self, retry_after: int) -> None:
+    def __init__(self, retry_after: float) -> None:
         super().__init__()
         self.retry_after = retry_after
 
@@ -239,7 +239,6 @@ class RateLimiter:
 
     def init_app(self, app: Quart) -> None:
         app.before_request(self._before_request)
-        app.after_request(self._after_request)
         app.before_serving(self._before_serving)
         app.after_serving(self._after_serving)
 
@@ -269,7 +268,7 @@ class RateLimiter:
             max_interval = rate_limit.period.total_seconds() - rate_limit.inverse
             if separation > max_interval:
                 retry_after = ((tat - timedelta(seconds=max_interval)) - now).total_seconds()
-                raise RateLimitExceeded(int(retry_after))
+                raise RateLimitExceeded(retry_after)
 
     async def _update_limits(self, endpoint: str, rate_limits: List[RateLimit]) -> None:
         # Update the tats for all the rate limits. This must only
@@ -280,27 +279,6 @@ class RateLimiter:
             tat = max(await self.store.get(key, now), now)
             new_tat = max(tat, now) + timedelta(seconds=rate_limit.inverse)
             await self.store.set(key, new_tat)
-
-    async def _after_request(self, response: Response) -> Response:
-        endpoint = request.endpoint
-        view_func = current_app.view_functions.get(endpoint)
-        blueprint = current_app.blueprints.get(request.blueprint)
-        rate_limits = self._get_limits_for_view_function(view_func, blueprint)
-        try:
-            min_limit = min(rate_limits, key=lambda rate_limit: rate_limit.period.total_seconds())
-        except ValueError:
-            pass  # No rate limits
-        else:
-            key = await self._create_key(endpoint, min_limit)
-            now = datetime.utcnow()
-            tat = max(await self.store.get(key, now), now)
-            separation = (tat - now).total_seconds()
-            remaining = int((min_limit.period.total_seconds() - separation) / min_limit.inverse)
-            response.headers["RateLimit-Limit"] = str(min_limit.count)
-            response.headers["RateLimit-Remaining"] = str(remaining)
-            response.headers["RateLimit-Reset"] = str(int(separation))
-
-        return response
 
     async def _create_key(self, endpoint: str, rate_limit: RateLimit) -> str:
         key_function = rate_limit.key_function or self.key_function
